@@ -14,7 +14,10 @@ msleep (mammal sleep) dataset using R.
 - Normalisation: z-score and min-max scaling
 - Encoding: one-hot, ordinal and frequency encoding
 - EDA: summary statistics, visualisations and correlation analysis
-   ![RStudio workspace](screenshot1.png)
+  ## Screenshot
+
+  ![RStudio workspace](screenshot1.png)
+
 ## How to run
     install.packages(c("tidyverse", "knitr", "rmarkdown"))
     rmarkdown::render("data_cleaning_analysis.Rmd")
