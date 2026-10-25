@@ -4,9 +4,13 @@ Internship task: data cleaning, preprocessing and exploratory analysis of the
 msleep (mammal sleep) dataset using R.
 
 ## Files
-- `data_cleaning_analysis.docx` - final report with code, outputs and plots
+- `data_cleaning_analysis.pdf` - final report with code, outputs and plots (open to view)
 - `data_cleaning_analysis.Rmd` - R Markdown source (code + explanations)
 - `msleep_clean.csv` - cleaned dataset
+
+## Screenshot
+
+![RStudio workspace](screenshot1.png)
 
 ## What was done
 - Missing values: dropped columns with >50% missing, "unknown" for categories, group-median imputation
@@ -14,9 +18,7 @@ msleep (mammal sleep) dataset using R.
 - Normalisation: z-score and min-max scaling
 - Encoding: one-hot, ordinal and frequency encoding
 - EDA: summary statistics, visualisations and correlation analysis
-  ## Screenshot
 
-  ![RStudio workspace](screenshot1.png)
 
 ## How to run
     install.packages(c("tidyverse", "knitr", "rmarkdown"))
