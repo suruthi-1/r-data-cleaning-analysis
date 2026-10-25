@@ -1,0 +1,433 @@
+---
+title: "Data Cleaning and Preliminary Analysis in R"
+subtitle: "Case study: Mammal Sleep Dataset (msleep)"
+author: "Suruthi D"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  word_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", dpi = 150)
+library(tidyverse)
+library(knitr)
+theme_set(theme_minimal(base_size = 11))
+```
+
+# 1. Introduction and Objective
+
+This report documents the data cleaning, preprocessing and preliminary analysis of a publicly available dataset using R. The objectives are to:
+
+1.  Select a dataset with missing values and a mix of categorical and numerical variables.
+2.  Clean it: handle missing values, detect outliers, normalise numeric variables and encode categorical variables.
+3.  Carry out exploratory data analysis (EDA) with `str()`, `summary()`, descriptive statistics, correlations and visualisations.
+4.  Record the reasoning behind every decision so the workflow is reproducible.
+
+# 2. Dataset Overview
+
+## 2.1 Source and rationale
+
+The **msleep** dataset ships with the `ggplot2` package. It is an updated and expanded version of the mammal sleep data of Allison and Cicchetti (1976), and contains sleep patterns, brain weight and body weight for 83 mammal species. It was chosen because it has:
+
+- **Missing values** in both numeric and categorical columns;
+- **A mix of variable types** (character/categorical and numeric);
+- **Strong outliers and skew** (e.g. elephants versus mice in body weight), which makes normalisation and outlier handling meaningful rather than cosmetic.
+
+## 2.2 Loading the data
+
+```{r load}
+data("msleep", package = "ggplot2")
+raw <- msleep          # keep an untouched copy for before/after comparisons
+dim(raw)
+```
+
+## 2.3 Data dictionary
+
+```{r dictionary}
+dictionary <- tibble(
+  Variable = c("name", "genus", "vore", "order", "conservation",
+               "sleep_total", "sleep_rem", "sleep_cycle", "awake",
+               "brainwt", "bodywt"),
+  Type = c(rep("Categorical", 5), rep("Numeric", 6)),
+  Description = c("Common name of the animal", "Genus", "Diet: carni, herbi, insecti, omni",
+                  "Taxonomic order", "Conservation status (IUCN-style code)",
+                  "Total sleep per day (hours)", "REM sleep per day (hours)",
+                  "Length of sleep cycle (hours)", "Hours awake per day",
+                  "Brain weight (kg)", "Body weight (kg)")
+)
+kable(dictionary)
+```
+
+# 3. Initial Inspection
+
+## 3.1 Structure
+
+```{r structure}
+str(raw)
+glimpse(raw)
+```
+
+## 3.2 Summary statistics of the raw data
+
+```{r raw-summary}
+summary(raw)
+```
+
+## 3.3 Missing values
+
+```{r missing-table}
+miss_tbl <- tibble(
+  variable    = names(raw),
+  n_missing   = colSums(is.na(raw)),
+  pct_missing = round(100 * n_missing / nrow(raw), 1)
+) %>% arrange(desc(n_missing))
+kable(miss_tbl, caption = "Missing values per variable in the raw data")
+```
+
+```{r missing-plot, fig.cap="Percentage of missing values per variable (raw data)"}
+ggplot(miss_tbl, aes(x = reorder(variable, pct_missing), y = pct_missing)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = "% missing")
+```
+
+## 3.4 Duplicates
+
+```{r duplicates}
+cat("Duplicated rows:", sum(duplicated(raw)), "\n")
+cat("Duplicated animal names:", sum(duplicated(raw$name)), "\n")
+```
+
+# 4. Data Cleaning and Transformation
+
+## 4.1 Type correction and text standardisation
+
+Leading/trailing whitespace is trimmed from text columns, and categorical columns are converted to factors so that R treats them as discrete groups.
+
+```{r types}
+df <- raw %>%
+  mutate(across(where(is.character), str_trim)) %>%
+  mutate(across(c(order, genus, vore, conservation), as.factor))
+str(df)
+```
+
+## 4.2 Handling missing values
+
+The strategy depends on the variable type and how much is missing:
+
+| Situation | Strategy | Reason |
+|------------------------|------------------------|------------------------|
+| Column with more than 50% missing | Drop the column | Imputing most of a column would mostly invent data |
+| Missing categorical value | Recode as an explicit `"unknown"` level | Missingness may itself be informative; avoids deleting rows |
+| Missing numeric value | Median of the animal's diet group (`vore`), falling back to the overall median | Median is robust to the heavy skew seen in brain weight; group median keeps biological structure |
+| Imputed numeric values | Add a logical flag column | Keeps imputation transparent for later modelling |
+
+```{r missing-handling}
+# (a) Drop columns with too much missingness
+threshold <- 0.5
+high_miss <- names(which(colMeans(is.na(df)) > threshold))
+cat("Columns dropped (>", threshold * 100, "% missing):", high_miss, "\n")
+df <- df %>% select(-all_of(high_miss))
+
+# (b) Categorical NA -> explicit "unknown" level
+df <- df %>%
+  mutate(across(c(vore, conservation),
+                ~ factor(replace_na(as.character(.x), "unknown"))))
+
+# (c) Numeric NA -> group median with overall-median fallback
+impute_group_median <- function(x, g) {
+  out <- ave(x, g, FUN = function(v) { v[is.na(v)] <- median(v, na.rm = TRUE); v })
+  out[is.na(out)] <- median(x, na.rm = TRUE)
+  out
+}
+
+df <- df %>%
+  mutate(brainwt_imputed  = is.na(brainwt),
+         sleep_rem_imputed = is.na(sleep_rem),
+         brainwt  = impute_group_median(brainwt,  vore),
+         sleep_rem = impute_group_median(sleep_rem, vore))
+
+# Verification: no missing values should remain
+kable(tibble(variable = names(df), n_missing = colSums(is.na(df))) %>%
+        filter(n_missing > 0),
+      caption = "Remaining missing values (empty means none)")
+cat("Total remaining NA:", sum(is.na(df)), "\n")
+```
+
+**Sensitivity check:** imputation should not distort the distributions much.
+
+```{r imputation-check}
+check <- tibble(
+  variable    = c("sleep_rem", "brainwt"),
+  mean_before = c(mean(raw$sleep_rem, na.rm = TRUE), mean(raw$brainwt, na.rm = TRUE)),
+  mean_after  = c(mean(df$sleep_rem), mean(df$brainwt)),
+  sd_before   = c(sd(raw$sleep_rem, na.rm = TRUE), sd(raw$brainwt, na.rm = TRUE)),
+  sd_after    = c(sd(df$sleep_rem), sd(df$brainwt))
+) %>% mutate(across(where(is.numeric), ~ round(.x, 4)))
+kable(check, caption = "Mean and SD before and after imputation")
+```
+
+## 4.3 Outlier detection
+
+Outliers are detected with the **IQR rule**: a value is flagged if it lies below Q1 − 1.5·IQR or above Q3 + 1.5·IQR.
+
+```{r outliers}
+iqr_outliers <- function(x) {
+  q   <- quantile(x, c(0.25, 0.75), na.rm = TRUE)
+  iqr <- q[2] - q[1]
+  x < q[1] - 1.5 * iqr | x > q[2] + 1.5 * iqr
+}
+
+num_vars <- df %>% select(where(is.numeric)) %>% names()
+
+outlier_summary <- map_dfr(num_vars, function(v) {
+  flag <- iqr_outliers(df[[v]])
+  tibble(variable = v, n_outliers = sum(flag), pct_outliers = round(100 * mean(flag), 1))
+})
+kable(outlier_summary, caption = "Outliers per numeric variable (IQR rule)")
+```
+
+```{r outlier-boxplot, fig.cap="Boxplots of numeric variables (free scales) showing outliers", fig.height=5}
+df %>%
+  select(all_of(num_vars)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = variable, y = value)) +
+  geom_boxplot(fill = "lightblue", outlier.colour = "firebrick") +
+  facet_wrap(~ variable, scales = "free") +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank())
+```
+
+```{r outlier-animals}
+df %>%
+  filter(iqr_outliers(bodywt)) %>%
+  select(name, bodywt, brainwt) %>%
+  arrange(desc(bodywt)) %>%
+  kable(caption = "Body-weight outliers")
+```
+
+**Decision:** these outliers are genuine biological measurements (e.g. large mammals), not data-entry errors, so deleting them would remove real information. Instead they are flagged and their influence is reduced with a log transformation (Section 4.4).
+
+```{r outlier-flag}
+df <- df %>% mutate(bodywt_outlier = iqr_outliers(bodywt),
+                    brainwt_outlier = iqr_outliers(brainwt))
+```
+
+## 4.4 Transformation and normalisation
+
+### Log transformation (to fix skew)
+
+```{r log-transform}
+df <- df %>% mutate(log_bodywt  = log10(bodywt),
+                    log_brainwt = log10(brainwt))
+```
+
+```{r log-plot, fig.cap="Body weight before and after log10 transformation"}
+bind_rows(tibble(scale = "Original (kg)", value = df$bodywt),
+          tibble(scale = "log10(kg)",     value = df$log_bodywt)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 20, fill = "steelblue", colour = "white") +
+  facet_wrap(~ scale, scales = "free") +
+  labs(x = NULL, y = "Count")
+```
+
+### Z-score and min-max scaling
+
+Z-score standardisation (mean 0, SD 1) suits methods sensitive to variance; min-max scaling (0 to 1) suits methods sensitive to range.
+
+```{r scaling}
+minmax <- function(x) (x - min(x)) / (max(x) - min(x))
+scale_vars <- c("sleep_total", "sleep_rem", "awake", "log_brainwt", "log_bodywt")
+
+df_norm <- df %>%
+  mutate(across(all_of(scale_vars),
+                list(z = ~ as.numeric(scale(.x)), mm = minmax)))
+
+z_check <- sapply(select(df_norm, ends_with("_z")),
+                  function(x) c(mean = mean(x), sd = sd(x)))
+kable(round(z_check, 3), caption = "Z-scored variables: mean ~ 0, SD = 1")
+
+mm_check <- sapply(select(df_norm, ends_with("_mm")),
+                   function(x) c(min = min(x), max = max(x)))
+kable(round(mm_check, 3), caption = "Min-max scaled variables: range 0 to 1")
+```
+
+## 4.5 Encoding categorical variables
+
+Three different encodings are used, each matched to the variable:
+
+| Variable | Encoding | Reason |
+|------------------------|------------------------|------------------------|
+| `vore` (5 levels, no order) | One-hot (dummy) | No natural order between diets |
+| `conservation` | Ordinal | Threat categories have a natural order of risk |
+| `order` (many levels) | Frequency encoding | One-hot would add too many columns for 83 rows |
+
+```{r encoding}
+# One-hot encoding for vore
+onehot <- model.matrix(~ vore - 1, data = df_norm)
+colnames(onehot) <- paste0("vore_", levels(df_norm$vore))
+
+# Ordinal encoding for conservation (least to most threatened).
+# "domesticated" and "unknown" are not points on the threat scale -> NA.
+threat_order <- c("lc", "cd", "nt", "vu", "en")
+
+df_enc <- bind_cols(df_norm, as_tibble(onehot)) %>%
+  mutate(conservation_ord = match(as.character(conservation), threat_order),
+         order_freq = ave(rep(1, n()), order, FUN = sum) / n())
+
+df_enc %>%
+  select(name, vore, starts_with("vore_"), conservation, conservation_ord,
+         order, order_freq) %>%
+  head(8) %>%
+  kable(digits = 3, caption = "First rows of the encoded variables")
+```
+
+## 4.6 Cleaned dataset
+
+```{r save-clean}
+dim(df_enc)
+write_csv(df_enc, "msleep_clean.csv")
+```
+
+# 5. Exploratory Data Analysis
+
+## 5.1 Structure and summary of the cleaned data
+
+```{r eda-str}
+str(df_enc %>% select(name, order, vore, conservation, all_of(num_vars)))
+```
+
+```{r eda-summary}
+summary(df_enc %>% select(vore, conservation, all_of(num_vars)))
+```
+
+## 5.2 Descriptive statistics
+
+```{r descriptive}
+desc <- df %>%
+  select(all_of(num_vars)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  group_by(variable) %>%
+  summarise(n = n(), mean = mean(value), median = median(value), sd = sd(value),
+            min = min(value), max = max(value),
+            skewness = mean((value - mean(value))^3) / sd(value)^3,
+            .groups = "drop") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+kable(desc, caption = "Descriptive statistics of numeric variables")
+```
+
+```{r by-vore}
+by_vore <- df %>%
+  group_by(vore) %>%
+  summarise(n = n(),
+            mean_sleep   = round(mean(sleep_total), 2),
+            median_sleep = round(median(sleep_total), 2),
+            mean_rem     = round(mean(sleep_rem), 2),
+            .groups = "drop") %>%
+  arrange(desc(mean_sleep))
+kable(by_vore, caption = "Sleep by diet group")
+```
+
+## 5.3 Distributions
+
+```{r hist-sleep, fig.cap="Distribution of total sleep (hours per day)"}
+ggplot(df, aes(sleep_total)) +
+  geom_histogram(bins = 15, fill = "steelblue", colour = "white") +
+  geom_vline(aes(xintercept = mean(sleep_total)), colour = "firebrick", linetype = "dashed") +
+  labs(x = "Total sleep (hours)", y = "Count")
+```
+
+```{r bar-vore, fig.cap="Number of species by diet"}
+ggplot(df, aes(x = fct_infreq(vore), fill = vore)) +
+  geom_bar(show.legend = FALSE) +
+  labs(x = "Diet (vore)", y = "Number of species")
+```
+
+```{r box-vore, fig.cap="Total sleep by diet group"}
+ggplot(df, aes(x = reorder(vore, sleep_total, median), y = sleep_total, fill = vore)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(x = "Diet (vore)", y = "Total sleep (hours)")
+```
+
+## 5.4 Relationships between variables
+
+```{r scatter-body, fig.cap="Total sleep versus log10 body weight, coloured by diet"}
+ggplot(df, aes(log_bodywt, sleep_total)) +
+  geom_point(aes(colour = vore), size = 2.5, alpha = 0.8) +
+  geom_smooth(method = "lm", formula = y ~ x, colour = "black") +
+  labs(x = "log10 body weight (kg)", y = "Total sleep (hours)", colour = "Diet")
+```
+
+```{r scatter-brain, fig.cap="log10 brain weight versus log10 body weight"}
+ggplot(df, aes(log_bodywt, log_brainwt)) +
+  geom_point(aes(colour = vore), size = 2.5, alpha = 0.8) +
+  geom_smooth(method = "lm", formula = y ~ x, colour = "black") +
+  labs(x = "log10 body weight (kg)", y = "log10 brain weight (kg)", colour = "Diet")
+```
+
+## 5.5 Correlation analysis
+
+```{r correlation}
+cor_vars <- c("sleep_total", "sleep_rem", "awake", "log_brainwt", "log_bodywt")
+cmat <- cor(df[cor_vars])
+kable(round(cmat, 2), caption = "Pearson correlation matrix")
+```
+
+```{r heatmap, fig.cap="Correlation heatmap"}
+as.data.frame(as.table(cmat)) %>%
+  ggplot(aes(Var1, Var2, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Freq, 2))) +
+  scale_fill_gradient2(low = "firebrick", mid = "white", high = "steelblue",
+                       limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL, fill = "r") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+```{r top-pairs}
+top_pairs <- as.data.frame(as.table(cmat)) %>%
+  filter(as.character(Var1) < as.character(Var2)) %>%
+  mutate(Freq = round(Freq, 3)) %>%
+  arrange(desc(abs(Freq))) %>%
+  rename(Variable_1 = Var1, Variable_2 = Var2, r = Freq)
+kable(top_pairs, caption = "Variable pairs ranked by absolute correlation")
+```
+
+# 6. Key Insights
+
+```{r insight-values, include=FALSE}
+r_sleep_body <- cor(df$sleep_total, df$log_bodywt)
+r_brain_body <- cor(df$log_brainwt, df$log_bodywt)
+r_sleep_rem  <- cor(df$sleep_total, df$sleep_rem)
+top_diet     <- as.character(by_vore$vore[1])
+```
+
+- **Data quality.** The raw data had `r sum(is.na(raw))` missing cells. After cleaning, `r sum(is.na(df))` remain in the analysis columns.
+- **Skewness.** Body and brain weight are strongly right-skewed on the raw scale; the log10 transform makes them far more symmetric and suitable for correlation and regression.
+- **Sleep and body size.** The correlation between total sleep and log body weight is `r round(r_sleep_body, 2)`, a `r ifelse(r_sleep_body < 0, "negative", "positive")` relationship: `r ifelse(r_sleep_body < 0, "larger", "smaller")` animals tend to sleep less.
+- **Brain and body size.** log brain weight and log body weight are highly correlated (r = `r round(r_brain_body, 2)`), reflecting allometric scaling.
+- **Sleep and REM.** Total sleep and REM sleep have r = `r round(r_sleep_rem, 2)`.
+- **Redundancy.** `awake` equals 24 minus `sleep_total`, so the two are perfectly negatively correlated (r = `r round(cor(df$sleep_total, df$awake), 2)`); only one should be used in a model.
+- **Diet.** The diet group with the highest average sleep is **`r top_diet`**. Group sizes are uneven (see Figure: species by diet), so this should be treated as a preliminary observation, not a conclusion.
+
+# 7. Conclusion and Limitations
+
+The dataset was cleaned through column removal, explicit-unknown recoding and group-median imputation; outliers were detected with the IQR rule and retained after log transformation; numeric variables were standardised and min-max scaled; and categorical variables were encoded with one-hot, ordinal and frequency methods.
+
+**Limitations:**
+
+- With only 83 species, group-level results (especially small diet groups) are unstable.
+- Median imputation shrinks variance slightly; more advanced methods (e.g. multiple imputation with `mice`) could be tested.
+- Correlation does not imply causation, and species are not independent observations because related species share ancestry.
+
+**Possible next steps:** regression of sleep on body size and diet, clustering of species, and multiple imputation.
+
+# Appendix: Reproducibility
+
+```{r session}
+sessionInfo()
+```
